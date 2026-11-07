@@ -811,10 +811,7 @@
       </div>
 
       <div style="background:#F5F6F8;border-radius:10px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between">
-        <div style="display:flex;align-items:baseline;gap:8px">
-          <span style="font-size:13px;font-weight:600">보드 랙</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#8B9098">{{ boardLabel }}</span>
-        </div>
+        <span style="font-size:13px;font-weight:600">보드</span>
         <div style="display:flex;align-items:center;gap:11px">
           <sc-for list="{{ boardCells }}" as="b" hint-placeholder-count="4">
             <span style="display:flex;align-items:center;gap:4px">
@@ -1389,7 +1386,6 @@ const INV_LETTERS = ['E', 'I', 'N', 'S', 'F', 'T', 'P', 'J'];
 const INV_MAX = 40;        // 카트리지당 최대 수량
 const INV_LOW = 16;        // 보충 기준 (이하)
 const INV_SHORT = 8;       // 부족 기준 (이하)
-const BOARD_MAX = 3;       // 보드 랙 동시 적재 최대
 
 // 카드 배치: 왼쪽 R·G, 오른쪽 Y·B
 const INV_ORDER = ['r', 'y', 'g', 'b'];
@@ -2855,11 +2851,6 @@ class Component extends DCLogic {
         return { color, count: ok ? Number(b.count) : null };
       });
 
-    const boardKnown = boards.some(b => b.count !== null);
-
-    const boardTotal =
-      boards.reduce((sum, b) => sum + (b.count || 0), 0);
-
     const hasData = known > 0;
 
 
@@ -2894,8 +2885,6 @@ class Component extends DCLogic {
       invShortMax: INV_SHORT,
 
       invCells: cells,
-
-      boardLabel: boardKnown ? `${boardTotal} / ${BOARD_MAX}` : '— / ' + BOARD_MAX,
 
       boardCells:
         boards.map(b => ({
