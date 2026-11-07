@@ -1520,13 +1520,34 @@ const MV = {
 const stationCx = sid => MV.ST_X[sid - 1] + MV.ST_W / 2;
 
 const AGV_SPEED = 170;     // px / s
-const TICK_MS = 200;
 
+
+// =========================================================
+// 주기 설정 (ms) — 폴링 · 타이머 주기는 전부 여기서만 바꾼다
+// =========================================================
+
+// 서버 폴링 (현황 대시보드에 들어와 있을 때만 돈다)
 const POLL = {
   orders: 5000,            // /admin/orders + /admin/stations
-  stocks: 5000,
-  statistics: 5000,
-  orderStats: 10000
+  stocks: 5000,            // /dashboard/stocks
+  statistics: 5000,        // /dashboard/statistics
+  orderStats: 10000,       // /dashboard/orders/stats
+
+  // AGV 이동경로 (/dashboard/mark/movement) — 응답에 따라 다음 간격이 달라진다
+  movement: {
+    moving: 1200,          // 이동 중 — 보고 간격(2초)보다 짧게 두어 새 점을 빨리 받는다
+    idle: 4000,            // 정차 중 · 위치 모름
+    backoff: [2000, 4000, 8000, 10000],   // 요청 실패 시 재시도 간격
+    legacyRetry: 30000     // 예전 방식으로 동작 중일 때 API 재확인 간격
+  }
+};
+
+// 화면 타이머 (서버 요청 없음)
+const TICK = {
+  clock: 1000,             // 시각 표시
+  intro: 500,              // 소개 화면 자동 전환 경과 시간
+  agvEstimate: 200,        // AGV 화면 갱신 — 주문 단계로 위치 추정할 때
+  agvMove: 100             // AGV 화면 갱신 — 실제 좌표를 따라갈 때
 };
 
 
@@ -1544,17 +1565,12 @@ const POLL = {
 const AGV_MOVE = {
   path: '/dashboard/mark/movement',
 
-  tickMs: 100,             // 화면 갱신 간격
-  followSec: 1.6,          // 진행률이 바뀌면 이 시간 안에 따라간다 (실제 보고 간격 2초보다 조금 짧게)
+  followSec: 1.6,        // 진행률이 바뀌면 이 시간 안에 따라간다 (실제 보고 간격 2초보다 조금 짧게)
   minSpeed: 30,            // 따라갈 때 최저 속도 px/s (끝에서 너무 느려지지 않게)
   maxProgress: 0.97,       // 도착점을 받기 전에는 여기까지만 간다
 
-  pollMoving: 1200,        // 이동 중 폴링 — 보고 간격(2초)보다 짧게 두어 새 점을 빨리 받는다
-  pollIdle: 4000,          // 정차 중 · 위치 모름
   staleMs: 10000,          // 이 시간 동안 새 점이 없으면 정차로 본다
-  backoff: [2000, 4000, 8000, 10000],   // 요청 실패 시 재시도 간격
-  legacyRetryMs: 30000,    // 예전 방식으로 동작 중일 때 API 재확인 간격
-  failToLegacy: 3          // 한 번도 성공 못 하고 이만큼 실패하면 예전 방식
+  failToLegacy: 3         // 한 번도 성공 못 하고 이만큼 실패하면 예전 방식
 };
 
 
@@ -1634,6 +1650,13 @@ function movePoint(p) {
   };
 }
 
+
+// 주문 단계로 위치를 추정해야 하는가
+//   실제 좌표를 받기 전(init) · API 안 됨(legacy) · API 는 되는데 위치를 모름
+//   (current == null — AGV 보고에 좌표가 없음)
+function estimateAgv(mv) {
+  return mv.mode !== 'api' || !mv.visible;
+}
 
 // 실제 이동 상태 (state.mv) 초기값
 //   mode: 'init'(확인 중) | 'api'(실제 좌표) | 'legacy'(추정)
@@ -1827,7 +1850,7 @@ class Component extends DCLogic {
   componentDidMount() {
 
     // 시각 — 모든 화면 공통
-    this.clockTimer = setInterval(() => this.setState({ now: new Date() }), 1000);
+    this.clockTimer = setInterval(() => this.setState({ now: new Date() }), TICK.clock);
 
     // 키보드 — ESC: 처음 화면 / 1·2: 대시보드 선택 / ←·→: 소개 페이지 이동
     this.onKey = e => this.handleKey(e);
@@ -1933,7 +1956,7 @@ class Component extends DCLogic {
 
     this.setState({ introPage: 0, elapsed: 0 });
 
-    this.introTimer = setInterval(() => this.introTick(), 500);
+    this.introTimer = setInterval(() => this.introTick(), TICK.intro);
 
   }
 
@@ -1963,7 +1986,7 @@ class Component extends DCLogic {
 
     this.setState(s => {
 
-      const t = s.elapsed + 0.5;
+      const t = s.elapsed + TICK.intro / 1000;
 
       if (t >= this.rotateSeconds) {
         dbg('auto-rotate', `page ${s.introPage} → ${(s.introPage + 1) % INTRO_TABS.length}`);
@@ -2242,7 +2265,7 @@ class Component extends DCLogic {
     this.setState(s => {
 
       // 실제 좌표를 쓰는 중이면 위치는 건드리지 않고 상태 문구용 정보만
-      if (s.mv.mode !== 'legacy') return { agvTask: task };
+      if (!estimateAgv(s.mv)) return { agvTask: task };
 
       const a = s.agv;
 
@@ -2286,7 +2309,7 @@ class Component extends DCLogic {
     // 다시 들어올 때 AGV 는 애니메이션 없이 현재 위치에서 시작
     this.setState(s => ({ agv: { ...s.agv, leg: null, ready: false } }));
 
-    this.agvTimer = setInterval(() => this.agvTick(), TICK_MS);
+    this.agvTimer = setInterval(() => this.agvTick(), TICK.agvEstimate);
 
 
     // 처음 들어오자마자 호출
@@ -2312,7 +2335,7 @@ class Component extends DCLogic {
     this.mvEverOk = false;
     this.cpCoord = loadCpCoord();
     this.setState({ mv: MV_RESET });
-    this.mvTimer = setInterval(() => this.mvTick(), AGV_MOVE.tickMs);
+    this.mvTimer = setInterval(() => this.mvTick(), TICK.agvMove);
     this.onVisibility = () => {
       if (document.hidden) {
         clearTimeout(this.mvPollTimer);
@@ -2389,11 +2412,11 @@ class Component extends DCLogic {
           }));
           if (this.state.orders.length || this.state.ordersAt) this.updateAgvTask(this.state.orders);
         }
-        this.scheduleMovement(AGV_MOVE.legacyRetryMs);
+        this.scheduleMovement(POLL.movement.legacyRetry);
         return;
       }
 
-      const b = AGV_MOVE.backoff;
+      const b = POLL.movement.backoff;
       this.scheduleMovement(b[Math.min(this.mvFails - 1, b.length - 1)]);
       console.error('[AGV 이동경로 API ERROR]', error);
       return;
@@ -2410,19 +2433,22 @@ class Component extends DCLogic {
 
     this.mvApply(data, full);
 
+    // 위치 모름 → 주문 단계로 추정한 자리에 바로 세운다 (다음 주문 폴링을 기다리지 않게)
+    if (!data.current && this.state.ordersAt) this.updateAgvTask(this.state.orders);
+
     const cur = data.current;
     const idle =
       !cur
       || !!cur.checkpoint
       || Date.now() - (this.mvLastNewAt || 0) > AGV_MOVE.staleMs;
 
-    this.scheduleMovement(idle ? AGV_MOVE.pollIdle : AGV_MOVE.pollMoving);
+    this.scheduleMovement(idle ? POLL.movement.idle : POLL.movement.moving);
 
   }
 
 
   // 응답 반영 — 프론트 규칙
-  //   current == null       → 위치 모름, 마커는 대기장소에 '위치 확인 중'으로 표시
+  //   current == null       → 위치 모름, 주문 단계로 위치 추정 (legacy 와 같은 방식)
   //   처음 · resync · full  → 이번 구간 점들로 상태를 다시 만들고 그 자리로 바로
   //   그 외                 → seq 가 새로운 점만 차례로 반영
   mvApply(data, full) {
@@ -2453,9 +2479,11 @@ class Component extends DCLogic {
       const maxSeq = points.reduce((v, p) => Math.max(v, p.seq), m0.lastSeq ?? -1);
 
       if (!current) {
-        dbgChanged('agv:movement', 'current = null → 위치 모름 (대기장소에 표시)');
+        dbgChanged('agv:movement', 'current = null → 위치 모름 → 주문 단계로 추정');
         return {
-          mv: { ...MV_RESET, mode: 'api', lastSeq: maxSeq >= 0 ? maxSeq : m0.lastSeq }
+          mv: { ...MV_RESET, mode: 'api', lastSeq: maxSeq >= 0 ? maxSeq : m0.lastSeq },
+          // 실제 좌표를 따라가다 위치를 잃으면 추정 위치로 바로 옮긴다 (ready: false)
+          agv: m0.visible ? { ...s.agv, leg: null, ready: false } : s.agv
         };
       }
 
@@ -2607,7 +2635,7 @@ class Component extends DCLogic {
 
       this.mvPlan(m, s.agvTask);
 
-      const dt = AGV_MOVE.tickMs / 1000;
+      const dt = TICK.agvMove / 1000;
       const diff = m.target - m.shown;
 
       if (diff <= 0.5) {
@@ -2640,15 +2668,8 @@ class Component extends DCLogic {
 
     const { mv: m, agv } = this.state;
 
-    if (m.mode !== 'api') return { ...agv, hidden: false, tickMs: TICK_MS };
-
-    // 위치 모름 (current == null) — 대기장소에 서 있는 것으로 그린다
-    if (!m.visible) {
-      return {
-        x: MV.PARK.x, y: MV.PARK.y, place: 'parking', leg: null,
-        ready: true, hidden: false, unknown: true, inTransit: false, tickMs: AGV_MOVE.tickMs
-      };
-    }
+    // 추정 모드 (API 안 됨 · 위치 모름) — 주문 단계로 정한 위치
+    if (estimateAgv(m)) return { ...agv, hidden: false, tickMs: TICK.agvEstimate };
 
     const moving = !m.stopped;
     const stale = moving && Date.now() - m.lastPointAt > AGV_MOVE.staleMs;
@@ -2665,7 +2686,7 @@ class Component extends DCLogic {
       stale,
       // 다음 점을 기다리는 잠깐도 '이동 중' — checkpoint 에 도착해야 정차
       inTransit: moving && !stale,
-      tickMs: AGV_MOVE.tickMs
+      tickMs: TICK.agvMove
     };
 
   }
@@ -2677,7 +2698,7 @@ class Component extends DCLogic {
 
   agvTick() {
 
-    if (this.state.mv.mode !== 'legacy') return;
+    if (!estimateAgv(this.state.mv)) return;
 
     const leg = this.state.agv.leg;
 
@@ -2689,7 +2710,7 @@ class Component extends DCLogic {
 
       if (!l || l.dist >= l.len) return {};
 
-      const dist = Math.min(l.len, l.dist + AGV_SPEED * TICK_MS / 1000);
+      const dist = Math.min(l.len, l.dist + AGV_SPEED * TICK.agvEstimate / 1000);
       const { at } = walkPath(l.pts, dist);
 
       return { agv: { ...s.agv, x: at.x, y: at.y, leg: { ...l, dist } } };
@@ -3454,11 +3475,8 @@ class Component extends DCLogic {
 
     if (o && o.fault) tone = 'warn';
 
-    // 실제 좌표 모드 — 위치 모름(대기장소에 표시) · 신호 끊김
-    if (agv.unknown) {
-      text = '위치 확인 중';
-      tone = 'idle';
-    } else if (agv.stale) {
+    // 실제 좌표 모드 — 신호 끊김
+    if (agv.stale) {
       text = '신호 대기';
       tone = 'idle';
     }
@@ -3550,7 +3568,7 @@ class Component extends DCLogic {
         left: agv.x + 'px',
         top: agv.y + 'px',
         transform: 'translate(-50%,-100%)',
-        transition: `left ${(agv.tickMs || TICK_MS) / 1000}s linear, top ${(agv.tickMs || TICK_MS) / 1000}s linear`,
+        transition: `left ${(agv.tickMs || TICK.agvEstimate) / 1000}s linear, top ${(agv.tickMs || TICK.agvEstimate) / 1000}s linear`,
         zIndex: 5,
         pointerEvents: 'none',
         opacity: agv.hidden ? 0 : agv.ready ? 1 : 0.5
