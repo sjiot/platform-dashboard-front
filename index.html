@@ -846,14 +846,24 @@
 
         <!-- ----------------------------------------------- -->
         <!-- 창고 카메라 영역 (640 × 360)                       -->
-        <!-- 웹캠 연동 시 이 블록 안쪽을 <video> 로 바꾼다        -->
+        <!-- 웹캠(내장 · USB) 영상이 잡히면 배치도 위에 덮어 보여주고, -->
+        <!-- 카메라가 없거나 꺼져 있으면 아래 배치도가 그대로 보인다     -->
+        <!-- 오른쪽 위 버튼 클릭 또는 C 키 → 카메라 전환 (… → 끄기)    -->
         <!-- ----------------------------------------------- -->
 
         <div style="position:absolute;left:0;top:0;width:640px;height:360px;border:1px solid #E2E5E9;border-radius:14px;overflow:hidden;background:#EEF0F3;box-sizing:border-box;padding:10px 12px 12px;display:flex;flex-direction:column;gap:8px">
 
-          <div style="display:flex;align-items:center;justify-content:space-between">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.22em;color:#8B9098">WAREHOUSE · CAM 01</span>
-            <span style="font-size:11px;color:#8B9098">스마트 창고</span>
+          <!-- 웹캠 영상 -->
+          <div style="{{ camLayer }}">
+            <video ref="{{ camRef }}" style="width:100%;height:100%;object-fit:cover;display:block"></video>
+          </div>
+
+          <div style="position:relative;z-index:3;display:flex;align-items:center;justify-content:space-between">
+            <span style="{{ camTitle }}">
+              <span style="{{ camDot }}"></span>
+              <span>{{ camTitleText }}</span>
+            </span>
+            <span onClick="{{ camNext }}" style="{{ camChip }}" title="클릭 또는 C 키 : 카메라 전환">{{ camChipText }}</span>
           </div>
 
           <!-- 키캡 구역 -->
@@ -1597,6 +1607,52 @@ function saveCpCoord(map) {
   try { localStorage.setItem(CP_STORE_KEY, JSON.stringify(map)); } catch (e) { }
 }
 
+
+// =========================================================
+// 창고 카메라 (웹캠) — 내장 카메라 · USB 카메라 모두 사용
+//
+//   현황 화면에 들어가면 마지막으로 고른 카메라를 연다.
+//   (처음이거나 그 카메라가 없으면 기본 카메라)
+//   USB 카메라를 꽂거나 빼면 자동으로 다시 연결한다.
+//   getUserMedia 는 https · localhost · file:// 에서만 동작한다.
+// =========================================================
+
+const CAM_STORE_KEY = 'warehouse:camDeviceId';
+const CAM_OFF = 'off';
+
+const CAM_RESET = {
+  status: 'idle',      // idle | starting | live | off | error
+  msg: '',
+  deviceId: null,
+  label: '',
+  devices: []          // [{ id, label }]
+};
+
+function loadCamId() {
+  try { return localStorage.getItem(CAM_STORE_KEY) || null; } catch (e) { return null; }
+}
+
+function saveCamId(id) {
+  try {
+    if (id) localStorage.setItem(CAM_STORE_KEY, id);
+    else localStorage.removeItem(CAM_STORE_KEY);
+  } catch (e) { }
+}
+
+// "USB Camera (046d:0825)" → "USB Camera"
+function camName(label, i) {
+  const s = String(label || '').replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)\s*$/i, '').trim();
+  return s || `카메라 ${i + 1}`;
+}
+
+function camErrorMsg(e) {
+  const n = e && e.name;
+  if (n === 'NotAllowedError' || n === 'SecurityError') return '카메라 권한 거부됨';
+  if (n === 'NotFoundError' || n === 'OverconstrainedError') return '카메라 없음';
+  if (n === 'NotReadableError' || n === 'AbortError') return '카메라 사용 중 (다른 앱 확인)';
+  return '카메라 연결 실패';
+}
+
 // 실제 좌표 사이 거리 — 격자 이동이라 맨해튼 거리
 function coordDist(a, b) {
   return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
@@ -1834,7 +1890,14 @@ class Component extends DCLogic {
     //   mode: 'init'(확인 중) | 'api'(실제 좌표) | 'legacy'(추정)
     // -----------------------------------------------------
 
-    mv: MV_RESET
+    mv: MV_RESET,
+
+
+    // -----------------------------------------------------
+    // 창고 카메라 (웹캠)
+    // -----------------------------------------------------
+
+    cam: CAM_RESET
 
   };
 
@@ -1939,6 +2002,10 @@ class Component extends DCLogic {
       if (e.key === 'ArrowLeft') this.goPage(this.state.introPage - 1);
       if (e.key === 'ArrowRight') this.goPage(this.state.introPage + 1);
       if (e.key === ' ') this.setState(s => ({ paused: !s.paused, elapsed: 0 }));
+    }
+
+    if (mode === 'status') {
+      if (e.key === 'c' || e.key === 'C' || e.code === 'KeyC') this.camNext();
     }
 
   }
@@ -2342,6 +2409,11 @@ class Component extends DCLogic {
     document.addEventListener('visibilitychange', this.onVisibility);
     this.fetchMovement(true);
 
+
+    // 창고 카메라
+
+    this.startCam();
+
   }
 
 
@@ -2360,6 +2432,336 @@ class Component extends DCLogic {
 
     this.agvTimer = this.ordersTimer = this.stockTimer =
       this.statisticsTimer = this.orderTimer = null;
+
+    this.stopCam();
+
+  }
+
+
+  // #######################################################
+  // 창고 카메라 (웹캠)
+  // #######################################################
+
+  // <video> 의 ref — 매 렌더마다 같은 함수여야 하므로 필드로 둔다
+  camRef = el => {
+    this.camVideo = el;
+    this.camAttach();
+  };
+
+  camNext = () => this.cycleCam();
+
+
+  // 현재 스트림을 <video> 에 연결 (없으면 비움)
+  camAttach() {
+
+    const v = this.camVideo;
+    if (!v) return;
+
+    v.muted = true;
+    v.autoplay = true;
+    v.playsInline = true;
+
+    const stream = this.camStream || null;
+    if (v.srcObject !== stream) v.srcObject = stream;
+    if (stream) {
+      const p = v.play();
+      if (p && p.catch) p.catch(() => { });
+    }
+
+  }
+
+
+  startCam() {
+
+    const md = navigator.mediaDevices;
+
+    this.camActive = true;
+    this.camSeq = (this.camSeq || 0) + 1;
+
+    if (!md || !md.getUserMedia) {
+      this.setState({ cam: { ...CAM_RESET, status: 'error', msg: '카메라 미지원 (https · localhost 필요)' } });
+      return;
+    }
+
+    // USB 카메라 연결 · 해제 감지
+    if (!this.onCamDevChange) {
+      this.onCamDevChange = () => this.camDevicesChanged();
+      md.addEventListener('devicechange', this.onCamDevChange);
+    }
+
+    const saved = loadCamId();
+
+    if (saved === CAM_OFF) {
+      this.setState(s => ({ cam: { ...s.cam, status: 'off', msg: '' } }));
+      this.refreshCams();
+      return;
+    }
+
+    this.openCam(saved);
+
+  }
+
+
+  stopCam() {
+
+    this.camActive = false;
+    this.camSeq = (this.camSeq || 0) + 1;
+    this.releaseCam();
+
+    const md = navigator.mediaDevices;
+    if (md && this.onCamDevChange) md.removeEventListener('devicechange', this.onCamDevChange);
+    this.onCamDevChange = null;
+
+  }
+
+
+  releaseCam() {
+
+    const stream = this.camStream;
+    this.camStream = null;
+
+    if (stream) {
+      stream.getTracks().forEach(t => {
+        t.onended = null;
+        try { t.stop(); } catch (e) { }
+      });
+    }
+
+    this.camAttach();
+
+  }
+
+
+  // deviceId 가 없으면 기본 카메라. 그 카메라가 없으면 기본 카메라로 다시 시도.
+  async openCam(deviceId) {
+
+    const md = navigator.mediaDevices;
+    if (!md || !md.getUserMedia || !this.camActive) return;
+
+    const seq = this.camSeq = (this.camSeq || 0) + 1;
+
+    this.releaseCam();
+    this.setState(s => ({ cam: { ...s.cam, status: 'starting', msg: '카메라 연결 중' } }));
+
+    const base = { width: { ideal: 1280 }, height: { ideal: 720 } };
+
+    let stream = null;
+    let err = null;
+
+    try {
+      stream = await md.getUserMedia({
+        video: deviceId ? { ...base, deviceId: { exact: deviceId } } : base,
+        audio: false
+      });
+    } catch (e) {
+      err = e;
+    }
+
+    if (!stream && deviceId && seq === this.camSeq && err && err.name !== 'NotAllowedError') {
+      dbg('cam', '저장된 카메라 없음 → 기본 카메라', err.name);
+      try {
+        stream = await md.getUserMedia({ video: base, audio: false });
+        err = null;
+      } catch (e) {
+        err = e;
+      }
+    }
+
+    // 그 사이 화면을 나갔거나 다른 카메라를 골랐으면 버린다
+    if (seq !== this.camSeq || !this.camActive) {
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      return;
+    }
+
+    if (!stream) {
+      dbg('cam', '연결 실패', err && err.name, err && err.message);
+      this.setState(s => ({ cam: { ...s.cam, status: 'error', msg: camErrorMsg(err), deviceId: null, label: '' } }));
+      this.refreshCams();
+      return;
+    }
+
+    const track = stream.getVideoTracks()[0];
+    const settings = (track && track.getSettings && track.getSettings()) || {};
+
+    // 케이블이 빠지면 트랙이 끝난다 → devicechange 에서 다시 연결
+    if (track) {
+      track.onended = () => {
+        if (this.camStream !== stream) return;
+        dbg('cam', '트랙 종료 (연결 해제)');
+        this.releaseCam();
+        this.setState(s => ({ cam: { ...s.cam, status: 'error', msg: '카메라 연결 끊김' } }));
+      };
+    }
+
+    this.camStream = stream;
+    this.camAttach();
+
+    const devices = await this.refreshCams();
+    if (seq !== this.camSeq) return;
+
+    const id = settings.deviceId || null;
+    const idx = devices.findIndex(d => d.id === id);
+
+    dbg('cam', '연결됨', track && track.label, settings.width + '×' + settings.height);
+
+    this.setState(s => ({
+      cam: {
+        ...s.cam,
+        status: 'live',
+        msg: '',
+        deviceId: id,
+        label: idx >= 0 ? devices[idx].label : camName(track && track.label, 0)
+      }
+    }));
+
+  }
+
+
+  async refreshCams() {
+
+    const md = navigator.mediaDevices;
+    if (!md || !md.enumerateDevices) return [];
+
+    let list = [];
+    try {
+      list = (await md.enumerateDevices())
+        .filter(d => d.kind === 'videoinput')
+        .map((d, i) => ({ id: d.deviceId, label: camName(d.label, i) }));
+    } catch (e) { }
+
+    if (this.camActive) this.setState(s => ({ cam: { ...s.cam, devices: list } }));
+
+    return list;
+
+  }
+
+
+  // USB 카메라를 꽂거나 뺐을 때
+  async camDevicesChanged() {
+
+    if (!this.camActive) return;
+
+    const devices = await this.refreshCams();
+    const saved = loadCamId();
+    const { cam } = this.state;
+
+    if (saved === CAM_OFF) return;
+
+    const savedThere = saved && devices.some(d => d.id === saved);
+    const currentThere = cam.deviceId && devices.some(d => d.id === cam.deviceId);
+
+    // 끊겼거나 / 지금 카메라가 사라졌거나 / 고른 카메라가 다시 꽂혔으면 다시 연결
+    if (
+      !this.camStream ||
+      !currentThere ||
+      (savedThere && cam.deviceId !== saved)
+    ) {
+      dbg('cam', '장치 변경 → 다시 연결', devices.map(d => d.label));
+      this.openCam(savedThere ? saved : null);
+    }
+
+  }
+
+
+  // 카메라 1 → 카메라 2 → … → 끄기 → 카메라 1
+  async cycleCam() {
+
+    if (!this.camActive) return;
+
+    let devices = this.state.cam.devices;
+    if (!devices.length) devices = await this.refreshCams();
+
+    const { cam } = this.state;
+    const order = [...devices.map(d => d.id).filter(Boolean), CAM_OFF];
+    const cur = cam.status === 'off' ? CAM_OFF : cam.deviceId;
+    const i = order.indexOf(cur);
+    const next = order[(i + 1) % order.length];
+
+    if (next === CAM_OFF && order.length > 1) {
+      saveCamId(CAM_OFF);
+      this.camSeq = (this.camSeq || 0) + 1;
+      this.releaseCam();
+      this.setState(s => ({ cam: { ...s.cam, status: 'off', msg: '', deviceId: null, label: '' } }));
+      return;
+    }
+
+    // 권한 전이라 목록이 비어 있으면 기본 카메라부터
+    const id = next === CAM_OFF ? null : next;
+    saveCamId(id);
+    this.openCam(id);
+
+  }
+
+
+  camVals() {
+
+    const { cam } = this.state;
+    const live = cam.status === 'live';
+    const n = cam.devices.length;
+    const idx = cam.devices.findIndex(d => d.id === cam.deviceId);
+
+    let chip;
+    if (live) chip = `● ${cam.label}${n > 1 ? `  ${idx + 1}/${n}` : ''}`;
+    else if (cam.status === 'off') chip = '카메라 꺼짐';
+    else if (cam.status === 'starting') chip = '카메라 연결 중…';
+    else if (cam.status === 'error') chip = cam.msg || '카메라 없음';
+    else chip = '스마트 창고';
+
+    return {
+
+      camRef: this.camRef,
+      camNext: this.camNext,
+
+      camLayer: {
+        position: 'absolute',
+        inset: 0,
+        zIndex: 2,
+        background: '#15171B',
+        display: live ? 'block' : 'none'
+      },
+
+      camTitle: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '7px',
+        fontFamily: "'JetBrains Mono',monospace",
+        fontSize: '11px',
+        letterSpacing: '.22em',
+        color: live ? '#FFFFFF' : '#8B9098',
+        background: live ? 'rgba(0,0,0,.45)' : 'transparent',
+        padding: live ? '4px 9px' : 0,
+        borderRadius: '6px'
+      },
+
+      camDot: {
+        display: live ? 'inline-block' : 'none',
+        width: '7px',
+        height: '7px',
+        borderRadius: '50%',
+        background: '#E5484D',
+        boxShadow: '0 0 0 3px rgba(229,72,77,.25)'
+      },
+
+      camTitleText: live ? 'WAREHOUSE · CAM 01 · LIVE' : 'WAREHOUSE · CAM 01',
+
+      camChip: {
+        cursor: 'pointer',
+        userSelect: 'none',
+        fontSize: '11px',
+        maxWidth: '300px',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        padding: '3px 9px',
+        borderRadius: '6px',
+        color: live ? '#FFFFFF' : (cam.status === 'error' ? '#C0544B' : '#8B9098'),
+        background: live ? 'rgba(0,0,0,.45)' : 'rgba(255,255,255,.7)',
+        border: live ? '1px solid rgba(255,255,255,.18)' : '1px solid #E2E5E9'
+      },
+
+      camChipText: chip
+
+    };
 
   }
 
@@ -4403,6 +4805,8 @@ class Component extends DCLogic {
 
 
     return {
+
+      ...this.camVals(),
 
 
       // ===================================================
