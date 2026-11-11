@@ -1531,8 +1531,8 @@ const POLL = {
 
   // AGV 이동경로 (/dashboard/mark/movement) — 응답에 따라 다음 간격이 달라진다
   movement: {
-    moving: 1200,          // 이동 중 — 보고 간격(2초)보다 짧게 두어 새 점을 빨리 받는다
-    idle: 4000,            // 정차 중 · 위치 모름
+    moving: 250,           // 이동 중 — 새 점을 최대한 빨리 받는다 (LAN 응답 ~30ms)
+    idle: 1000,            // 정차 중 · 위치 모름 — 출발을 1초 안에 알아챈다
     backoff: [2000, 4000, 8000, 10000],   // 요청 실패 시 재시도 간격
     legacyRetry: 30000     // 예전 방식으로 동작 중일 때 API 재확인 간격
   }
@@ -1561,7 +1561,11 @@ const TICK = {
 const AGV_MOVE = {
   path: '/dashboard/mark/movement',
 
-  followSec: 1.6,        // 진행률이 바뀌면 이 시간 안에 따라간다 (실제 보고 간격 2초보다 조금 짧게)
+  // 받은 점들을 ts 순서대로 이 시간만큼 늦게 다시 재생한다 (실제 속도 그대로, 끊김 없이)
+  //   AGV 보고 간격(~1.1초) + 폴링 간격(0.25초) 보다 조금 길게. 줄이면 덜 늦지만 중간에 멈칫한다.
+  replayDelayMs: 1400,
+  followSec: 0.5,          // 재생 위치에서 크게 벗어났을 때(경로 바뀜 등) 따라가는 시간 상수
+  snapPx: 40,              // 재생 위치와 이만큼 이내면 바로 맞춘다
   minSpeed: 30,            // 따라갈 때 최저 속도 px/s (끝에서 너무 느려지지 않게)
   maxProgress: 0.97,       // 도착점을 받기 전에는 여기까지만 간다
 
@@ -1571,18 +1575,18 @@ const AGV_MOVE = {
 
 
 // ---------------------------------------------------------
-// 도착점(checkpoint)의 실제 좌표 [c, r]
+// 도착점(checkpoint)의 실제 좌표 [x, y] (m) — AGV 지도 기준
 //
-// 진행률 계산에 쓴다. 비워 두면 도착점에 붙어 온 coord 로 저절로 채워지고
-// (브라우저에 저장), 여기 적은 값이 있으면 그 값이 우선한다.
+// 진행률 계산에 쓴다. 여기 적은 값이 항상 우선한다.
+// 빠진 곳만 도착점에 붙어 온 coord 로 저절로 채워진다 (브라우저에 저장).
 // ---------------------------------------------------------
 
 const AGV_CHECKPOINT_COORD = {
-  // 'parking':   [0, 0],
-  // 'station:1': [1, 4],
-  // 'station:2': [3, 4],
-  // 'station:3': [5, 4],
-  // 'discard':   [0, 4]
+  'parking':   [-0.248, 0.295],   // out_warehouse (창고 · 대기장소)  yaw −11.9°
+  'station:1': [-1.740, 1.510],   // out_station1                      yaw 177.3°
+  'station:2': [-1.508, 3.153],   // out_station2                      yaw 175.0°
+  'station:3': [-1.057, 5.379],   // out_station3                      yaw −179.5°
+  'discard':   [-4.793, 6.600]    // out_disposal (폐기)               yaw −100.0°
 };
 
 const CP_STORE_KEY = 'agv:checkpointCoord';
@@ -1597,9 +1601,14 @@ function saveCpCoord(map) {
   try { localStorage.setItem(CP_STORE_KEY, JSON.stringify(map)); } catch (e) { }
 }
 
-// 실제 좌표 사이 거리 — 격자 이동이라 맨해튼 거리
-function coordDist(a, b) {
-  return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
+// 진행도 — 지금 좌표를 출발점 → 목적지 직선 위에 투영한 비율 (0 = 출발, 1 = 도착)
+//   남은 거리 비율과 달리 옆으로 흔들리거나 제자리 회전할 때 값이 튀지 않는다.
+//   출발점 · 목적지가 거의 같으면 null
+function legProgress(start, dest, c) {
+  const vx = dest[0] - start[0], vy = dest[1] - start[1];
+  const L2 = vx * vx + vy * vy;
+  if (L2 < 1e-6) return null;
+  return ((c[0] - start[0]) * vx + (c[1] - start[1]) * vy) / L2;
 }
 
 // leg 값에 목적지가 들어 있으면 꺼낸다 (예: 'parking→station:2' → 'station:2')
@@ -1641,6 +1650,7 @@ function movePoint(p) {
   return {
     coord,
     seq: Number(p.seq),
+    ts: Number(p.ts) || null,
     leg: p.leg,
     checkpoint: p.checkpoint || null
   };
@@ -1673,7 +1683,9 @@ const MV_RESET = {
   legAt: 0,                // 구간 시작 시각 (목적지 좌표를 모를 때 시간으로 추정)
   stopped: false,
   place: null,             // 정차한 checkpoint
-  lastPointAt: 0           // 새 점을 마지막으로 받은 시각
+  lastPointAt: 0,          // 새 점을 마지막으로 받은 시각
+  samples: [],             // 이번 구간의 점 [{ t: ts, coord, cp }] — 시간 재생용
+  replay: false            // 진행률을 시간 재생으로 구하는 중
 };
 
 
@@ -2329,6 +2341,7 @@ class Component extends DCLogic {
 
     this.mvFails = 0;
     this.mvEverOk = false;
+    this.mvSkew = null;
     this.cpCoord = loadCpCoord();
     this.setState({ mv: MV_RESET });
     this.mvTimer = setInterval(() => this.mvTick(), TICK.agvMove);
@@ -2455,6 +2468,14 @@ class Component extends DCLogic {
       .filter(Boolean)
       .sort((a, b) => a.seq - b.seq);
 
+    // 서버 ts → 브라우저 시각 차이 (가장 덜 늦게 받은 점 기준)
+    const nowMs = Date.now();
+    [...points, current].forEach(p => {
+      if (!p || !p.ts) return;
+      const skew = nowMs - p.ts;
+      if (this.mvSkew == null || skew < this.mvSkew) this.mvSkew = skew;
+    });
+
     // 도착점 실제 좌표 기억 (설정값이 있으면 그것 우선)
     let learned = false;
     [...points, current].forEach(p => {
@@ -2533,9 +2554,13 @@ class Component extends DCLogic {
       m.legAt = Date.now();
       m.stopped = false;
       m.place = null;
+      m.samples = [];
     }
 
     if (p.coord) m.lastCoord = p.coord;
+    if (p.ts && (p.coord || p.checkpoint)) {
+      m.samples = [...(m.samples || []), { t: p.ts, coord: p.coord, cp: p.checkpoint }].slice(-120);
+    }
 
     if (p.checkpoint) {
       m.stopped = true;
@@ -2593,16 +2618,23 @@ class Component extends DCLogic {
 
     const len = m.route.len;
 
-    if (m.stopped) {
+    const dc = this.cpCoord[m.dest];
+    const canReplay = !!(m.samples && m.samples.length && this.mvSkew != null);
+
+    if (m.stopped && !(canReplay && m.dest === m.place)) {
       m.target = len;
+      m.replay = false;
       return;
     }
 
     let r;
-    const dc = this.cpCoord[m.dest];
-    if (dc && m.startCoord && m.lastCoord) {
-      const total = coordDist(m.startCoord, dc);
-      r = total > 0 ? 1 - coordDist(m.lastCoord, dc) / total : 0;
+    m.replay = false;
+    if (canReplay && (m.stopped || (dc && m.startCoord))) {
+      r = this.mvReplay(m, dc);
+      m.replay = true;
+      if (r >= 1) { m.target = len; return; }
+    } else if (dc && m.startCoord && m.lastCoord) {
+      r = legProgress(m.startCoord, dc, m.lastCoord) ?? 0;
     } else {
       // 목적지 실제 좌표를 모름 → 시간으로 추정
       r = len > 0 ? (Date.now() - m.legAt) / 1000 * AGV_SPEED / len : 0;
@@ -2611,6 +2643,26 @@ class Component extends DCLogic {
     r = Math.min(AGV_MOVE.maxProgress, Math.max(0, r));
     m.target = Math.max(m.target, r * len);   // 뒤로 가지 않는다
 
+  }
+
+
+  // 받은 점들을 ts 기준으로 replayDelayMs 만큼 늦게 재생 → 지금 그릴 진행률 (0~1)
+  mvReplay(m, dc) {
+    const rOf = sm => {
+      if (sm.cp && sm.cp === m.dest) return 1;
+      if (!dc || !m.startCoord || !sm.coord) return null;
+      const r = legProgress(m.startCoord, dc, sm.coord);
+      return r === null ? null : Math.min(AGV_MOVE.maxProgress, Math.max(0, r));
+    };
+    const pts = m.samples.map(sm => ({ t: sm.t, r: rOf(sm) })).filter(x => x.r !== null);
+    if (!pts.length) return 0;
+    const t = Date.now() - this.mvSkew - AGV_MOVE.replayDelayMs;
+    if (t <= pts[0].t) return pts[0].r;
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i];
+      if (t <= b.t) return b.t > a.t ? a.r + (b.r - a.r) * (t - a.t) / (b.t - a.t) : b.r;
+    }
+    return pts[pts.length - 1].r;
   }
 
 
@@ -2623,7 +2675,7 @@ class Component extends DCLogic {
     const m0 = this.state.mv;
 
     if (m0.mode !== 'api' || !m0.visible) return;
-    if (m0.stopped && m0.route && m0.dest === m0.place && m0.shown >= m0.target) return;
+    if (m0.stopped && m0.route && m0.dest === m0.place && m0.shown >= m0.route.len) return;
 
     this.setState(s => {
 
@@ -2634,8 +2686,8 @@ class Component extends DCLogic {
       const dt = TICK.agvMove / 1000;
       const diff = m.target - m.shown;
 
-      if (diff <= 0.5) {
-        m.shown = m.target;
+      if (diff <= (m.replay ? AGV_MOVE.snapPx : 0.5)) {
+        m.shown = Math.max(m.shown, m.target);
       } else {
         m.shown += Math.min(diff, Math.max(AGV_MOVE.minSpeed * dt, diff * dt / AGV_MOVE.followSec));
       }
