@@ -1784,6 +1784,9 @@ function ymdKey(d) {
 const HOURLY_TODAY = '#4BA3CC';
 const HOURLY_YDAY = '#E5C46B';
 
+// 시간별 주문 추이 가로축 시작 시각 (이 시각 전 주문은 그래프에서 뺀다)
+const HOURLY_START_HOUR = 10;
+
 function polyLen(pts) {
   let len = 0;
   for (let i = 1; i < pts.length; i++) {
@@ -3509,7 +3512,33 @@ class Component extends DCLogic {
     const T = 16;
     const B = 22;          // x 라벨
 
-    const today = orders.filter(o => o.created && sameDay(o.created, now));
+    const HOUR = 3600000;
+
+    // 가로축 시작 = 오늘 HOURLY_START_HOUR 시 정각 (그 전 주문은 그래프에서 뺀다)
+    const start = new Date(now);
+    start.setHours(HOURLY_START_HOUR, 0, 0, 0);
+
+    const t0 = start.getTime();
+
+    const placeholder = text => ({
+      hourlyChart: el(
+        'div',
+        {
+          style: {
+            position: 'absolute', inset: 0, display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
+            fontSize: '16.8px', color: P.sub
+          }
+        },
+        text
+      )
+    });
+
+    if (now.getTime() < t0) {
+      return placeholder(`${HOURLY_START_HOUR}시부터 표시됩니다`);
+    }
+
+    const today = orders.filter(o => o.created && sameDay(o.created, now) && o.created.getTime() >= t0);
 
     // 어제 — 같은 시각(분 단위)까지만, 오늘 날짜의 같은 시각으로 옮겨 놓는다
     // (주문 건수 증감 카드의 yesterday_same_time_orders 와 같은 기준)
@@ -3529,38 +3558,20 @@ class Component extends DCLogic {
         const d = new Date(now);
         d.setHours(Math.floor(m / 60), m % 60, 0, 0);
         return d.getTime();
-      });
+      })
+      .filter(t => t >= t0);
 
     if (!today.length && !ydAt.length) {
-      return {
-        hourlyChart: el(
-          'div',
-          {
-            style: {
-              position: 'absolute', inset: 0, display: 'flex',
-              alignItems: 'center', justifyContent: 'center',
-              fontSize: '16.8px', color: P.sub
-            }
-          },
-          this.state.ordersAt
-            ? '오늘 들어온 주문이 없습니다'
-            : this.state.ordersErr ? '주문 데이터 연결 오류' : '주문 데이터를 불러오는 중'
-        )
-      };
+      return placeholder(
+        this.state.ordersAt
+          ? '오늘 들어온 주문이 없습니다'
+          : this.state.ordersErr ? '주문 데이터 연결 오류' : '주문 데이터를 불러오는 중'
+      );
     }
-
-    const HOUR = 3600000;
 
     const todayAt = today.map(o => o.created.getTime());
 
-    // 시작 = 오늘·어제 중 더 이른 첫 주문의 정시
-    const firstAt = Math.min(...todayAt, ...ydAt);
-
-    const h0 = new Date(firstAt);
-    h0.setMinutes(0, 0, 0);
-
-    const t0 = h0.getTime();
-    const t1 = Math.max(now.getTime(), firstAt + 1);
+    const t1 = Math.max(now.getTime(), t0 + 1);
 
     const n = Math.floor((t1 - t0) / HOUR) + 1;
 
