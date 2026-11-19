@@ -706,14 +706,19 @@
           <span style="font-family:'Chakra Petch',sans-serif;font-size:86.4px;font-weight:600;line-height:.95">{{ todayOrders }}</span>
           <span style="font-size:21.6px;color:#8B9098">{{ todayUnit }}</span>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <div style="background:#F5F6F8;border-radius:12px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between">
-            <span style="display:flex;align-items:center;gap:7px;font-size:16.8px;color:#8B9098"><span style="width:8px;height:8px;border-radius:50%;background:#E5C46B"></span>대기</span>
-            <span style="font-family:'Chakra Petch',sans-serif;font-size:28.8px;font-weight:600;line-height:1">{{ waitingOrders }}</span>
+        <!-- 대기(대기열) · 진행 중(queued·completed 외 단계) · 완료 — 칸이 좁아 라벨 위, 숫자 아래 -->
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px">
+          <div style="background:#F5F6F8;border-radius:12px;padding:7px 11px;display:flex;flex-direction:column;gap:3px;min-width:0">
+            <span style="display:flex;align-items:center;gap:6px;font-size:15.6px;color:#8B9098;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#E5C46B;flex:none"></span>대기</span>
+            <span style="font-family:'Chakra Petch',sans-serif;font-size:28.8px;font-weight:600;line-height:1;text-align:right">{{ waitingOrders }}</span>
           </div>
-          <div style="background:#F5F6F8;border-radius:12px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between">
-            <span style="display:flex;align-items:center;gap:7px;font-size:16.8px;color:#8B9098"><span style="width:8px;height:8px;border-radius:50%;background:#8ECB9A"></span>완료</span>
-            <span style="font-family:'Chakra Petch',sans-serif;font-size:28.8px;font-weight:600;line-height:1">{{ completedToday }}</span>
+          <div style="background:#F5F6F8;border-radius:12px;padding:7px 11px;display:flex;flex-direction:column;gap:3px;min-width:0">
+            <span style="display:flex;align-items:center;gap:6px;font-size:15.6px;color:#8B9098;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#4BA3CC;flex:none"></span>진행 중</span>
+            <span style="font-family:'Chakra Petch',sans-serif;font-size:28.8px;font-weight:600;line-height:1;text-align:right">{{ inProgressOrders }}</span>
+          </div>
+          <div style="background:#F5F6F8;border-radius:12px;padding:7px 11px;display:flex;flex-direction:column;gap:3px;min-width:0">
+            <span style="display:flex;align-items:center;gap:6px;font-size:15.6px;color:#8B9098;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#8ECB9A;flex:none"></span>완료</span>
+            <span style="font-family:'Chakra Petch',sans-serif;font-size:28.8px;font-weight:600;line-height:1;text-align:right">{{ completedToday }}</span>
           </div>
         </div>
       </div>
@@ -3441,9 +3446,17 @@ class Component extends DCLogic {
   // 상단 KPI
   // =======================================================
 
-  kpiView(kpi) {
+  kpiView(kpi, orders, ordersAt) {
 
     const k = kpi || {};
+
+    // 진행 중 = 아직 안 끝난 주문 중 queued(대기) · completed(완료) 가 아닌 단계 전부
+    // (창고 출고 ~ 사용자 수령 전. fault 걸린 주문도 끝난 게 아니므로 포함)
+    // 노쇼(dup)는 이미 끝난 주문이 폐기 완료까지 목록에 남은 것이라 뺀다
+    // 비정상 종료(중단·노쇼·타임아웃)는 어느 칸에도 넣지 않는다
+    const inProgress = ordersAt
+      ? orders.filter(o => !o.ended && !o.dup && o.stage !== 'queued' && o.stage !== 'completed').length
+      : null;
 
     const today = kpi ? k.today_orders : null;
     const yday = kpi ? k.yesterday_same_time : null;
@@ -3477,6 +3490,8 @@ class Component extends DCLogic {
       todayOrders: kpi ? fmtNum(k.today_orders) : '—',
 
       waitingOrders: kpi ? fmtNum(k.waiting_orders) : '—',
+
+      inProgressOrders: inProgress === null ? '—' : fmtNum(inProgress),
 
       completedToday: kpi ? fmtNum(k.completed_today) : '—',
 
@@ -5009,7 +5024,7 @@ class Component extends DCLogic {
       // 상단 KPI · 시간별 추이
       // ===================================================
 
-      ...this.kpiView(kpi),
+      ...this.kpiView(kpi, orders, ordersAt),
 
       ...this.hourlyView(orders, now),
 
