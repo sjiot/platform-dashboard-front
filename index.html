@@ -732,6 +732,10 @@
       <div style="border:1px solid #E2E5E9;border-radius:18px;background:#FFFFFF;box-shadow:0 2px 10px rgba(52,56,63,.04);padding:18px 20px 12px;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;min-width:0">
         <div style="display:flex;align-items:center;justify-content:space-between">
           <span style="font-size:22.8px;font-weight:600">시간별 주문 추이</span>
+          <span style="display:flex;align-items:center;gap:14px;font-size:15.6px;color:#8B9098">
+            <span style="display:flex;align-items:center;gap:6px"><span style="width:18px;height:3px;border-radius:2px;background:#4BA3CC"></span>오늘</span>
+            <span style="display:flex;align-items:center;gap:6px"><span style="width:18px;height:3px;border-radius:2px;background:#E5C46B"></span>어제</span>
+          </span>
         </div>
         <div style="flex:1;position:relative;min-height:0">
           {{ hourlyChart }}
@@ -1028,24 +1032,26 @@
           <span style="font-family:'JetBrains Mono',monospace;font-size:13.2px;color:#8B9098;border:1px solid #E2E5E9;border-radius:6px;padding:3px 7px">완료 {{ completedOrders }}건</span>
         </div>
 
-        <div style="display:flex;justify-content:center">
-          <div style="position:relative;width:184px;height:184px;flex:none">
+        <!-- 도넛 — 순위 목록을 놓고 남는 높이만큼 (최대 184px). 공간이 모자라면 겹치지 않고 작아진다 -->
+        <!-- 가운데 구멍·글자는 도넛 크기 비율(184px 기준)로 같이 줄어든다 -->
+        <div style="flex:1;min-height:0;display:flex;justify-content:center;align-items:center">
+          <div style="position:relative;height:100%;max-height:184px;aspect-ratio:1;container-type:size">
             <div style="{{ donut }}"></div>
-            <div style="position:absolute;left:34px;top:34px;width:116px;height:116px;border-radius:50%;background:#FFFFFF;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px">
-              <span style="font-size:13.2px;color:#8B9098">1위</span>
-              <span style="font-family:'Chakra Petch',sans-serif;font-size:36px;font-weight:700;line-height:1">{{ mbtiFirstType }}</span>
-              <span style="font-family:'Chakra Petch',sans-serif;font-size:18px;font-weight:600;color:#8B9098">{{ mbtiFirstPct }}</span>
+            <div style="position:absolute;inset:18.48%;border-radius:50%;background:#FFFFFF;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px">
+              <span style="font-size:min(13.2px,7.17cqh);color:#8B9098">1위</span>
+              <span style="font-family:'Chakra Petch',sans-serif;font-size:min(36px,19.57cqh);font-weight:700;line-height:1">{{ mbtiFirstType }}</span>
+              <span style="font-family:'Chakra Petch',sans-serif;font-size:min(18px,9.78cqh);font-weight:600;color:#8B9098">{{ mbtiFirstPct }}</span>
             </div>
           </div>
         </div>
 
-        <div style="flex:1;display:flex;flex-direction:column;gap:6px;justify-content:flex-end;min-height:0">
+        <div style="flex:none;display:flex;flex-direction:column;gap:6px">
           <sc-for list="{{ mbtiTop }}" as="m" hint-placeholder-count="4">
             <div style="{{ m.row }}">
               <span style="{{ m.rank }}">{{ m.no }}</span>
-              <span style="font-family:'Chakra Petch',sans-serif;font-size:22.8px;font-weight:700;flex:1">{{ m.type }}</span>
-              <span style="font-size:15.6px;color:#8B9098">{{ m.count }}</span>
-              <span style="font-family:'Chakra Petch',sans-serif;font-size:20.4px;font-weight:600;width:58px;text-align:right">{{ m.pct }}</span>
+              <span style="font-family:'Chakra Petch',sans-serif;font-size:20.5px;font-weight:700;flex:1">{{ m.type }}</span>
+              <span style="font-size:14px;color:#8B9098">{{ m.count }}</span>
+              <span style="font-family:'Chakra Petch',sans-serif;font-size:18.4px;font-weight:600;width:58px;text-align:right">{{ m.pct }}</span>
             </div>
           </sc-for>
           <sc-if value="{{ mbtiEmpty }}">
@@ -1538,6 +1544,7 @@ const POLL = {
   stocks: 5000,            // /dashboard/stocks
   statistics: 5000,        // /dashboard/statistics
   orderStats: 10000,       // /dashboard/orders/stats
+  ydayTimeline: 60000,     // /dashboard/orders/timeline?date=어제 — 아직 못 받았거나 날짜가 바뀌었을 때만 실제 요청
 
   // AGV 이동경로 (/dashboard/mark/movement) — 응답에 따라 다음 간격이 달라진다
   movement: {
@@ -1768,6 +1775,15 @@ function sameDay(a, b) {
     && a.getDate() === b.getDate();
 }
 
+// Date → 'YYYYMMDD' (백엔드 날짜 키 형식)
+function ymdKey(d) {
+  return `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}`;
+}
+
+// 시간별 주문 추이 선 색 — 오늘(앞) · 어제(뒤, 노랑)
+const HOURLY_TODAY = '#4BA3CC';
+const HOURLY_YDAY = '#E5C46B';
+
 function polyLen(pts) {
   let len = 0;
   for (let i = 1; i < pts.length; i++) {
@@ -1869,6 +1885,14 @@ class Component extends DCLogic {
     // -----------------------------------------------------
 
     statistics: null,
+
+
+    // -----------------------------------------------------
+    // 어제 시간별 주문 · GET /dashboard/orders/timeline?date=어제
+    // { date: 'YYYYMMDD', times: ['09:30', ...] } — 받기 전에는 null
+    // -----------------------------------------------------
+
+    yday: null,
 
 
     // -----------------------------------------------------
@@ -2197,6 +2221,48 @@ class Component extends DCLogic {
 
 
   // =======================================================
+  // 어제 시간별 주문 · GET /dashboard/orders/timeline?date=어제
+  //
+  // 어제 기록은 하루 동안 바뀌지 않으므로 날짜당 한 번만 받는다.
+  // 타이머는 1분마다 돌지만 이미 받은 날짜면 요청하지 않는다
+  // → 실패하면 1분 뒤 재시도, 자정이 지나면 새 '어제'를 받는다
+  // =======================================================
+
+  async fetchYesterdayTimeline() {
+
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    const date = ymdKey(d);
+
+    if (this.state.yday?.date === date || this.ydayLoading) return;
+
+    this.ydayLoading = true;
+
+    try {
+
+      const data = await this.getJson(`/dashboard/orders/timeline?date=${date}`, '어제 주문 추이 조회 실패');
+
+      const times = (Array.isArray(data.times) ? data.times : [])
+        .filter(t => /^\d{2}:\d{2}$/.test(t));
+
+      this.setState({ yday: { date, times } });
+
+      dbgChanged('dashboard/orders/timeline (yday)', `${date} ${times.length}건`);
+
+    } catch (error) {
+
+      console.error('[어제 주문 추이 API ERROR]', error);
+
+    } finally {
+
+      this.ydayLoading = false;
+
+    }
+
+  }
+
+
+  // =======================================================
   // 주문 목록 · GET /admin/orders  (+ 사용자 호출 · GET /admin/stations)
   //
   // 앞쪽이 진행 중 주문, 뒤쪽이 오늘 아카이브.
@@ -2393,6 +2459,7 @@ class Component extends DCLogic {
     this.fetchStocks();
     this.fetchOrderStats();
     this.fetchStatistics();
+    this.fetchYesterdayTimeline();
 
 
     this.ordersTimer = setInterval(() => this.fetchOrders(), POLL.orders);
@@ -2402,6 +2469,8 @@ class Component extends DCLogic {
     this.statisticsTimer = setInterval(() => this.fetchStatistics(), POLL.statistics);
 
     this.orderTimer = setInterval(() => this.fetchOrderStats(), POLL.orderStats);
+
+    this.ydayTimer = setInterval(() => this.fetchYesterdayTimeline(), POLL.ydayTimeline);
 
 
     // AGV 실제 이동
@@ -2442,9 +2511,10 @@ class Component extends DCLogic {
     clearInterval(this.stockTimer);
     clearInterval(this.statisticsTimer);
     clearInterval(this.orderTimer);
+    clearInterval(this.ydayTimer);
 
     this.agvTimer = this.ordersTimer = this.stockTimer =
-      this.statisticsTimer = this.orderTimer = null;
+      this.statisticsTimer = this.orderTimer = this.ydayTimer = null;
 
     this.stopCam();
 
@@ -3441,7 +3511,27 @@ class Component extends DCLogic {
 
     const today = orders.filter(o => o.created && sameDay(o.created, now));
 
-    if (!today.length) {
+    // 어제 — 같은 시각(분 단위)까지만, 오늘 날짜의 같은 시각으로 옮겨 놓는다
+    // (주문 건수 증감 카드의 yesterday_same_time_orders 와 같은 기준)
+    const ydKey = new Date(now);
+    ydKey.setDate(ydKey.getDate() - 1);
+
+    const yd = this.state.yday;
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+
+    const ydAt = (yd && yd.date === ymdKey(ydKey) ? yd.times : [])
+      .map(t => {
+        const [hh, mm] = t.split(':').map(Number);
+        return hh * 60 + mm;
+      })
+      .filter(m => m <= nowMin)
+      .map(m => {
+        const d = new Date(now);
+        d.setHours(Math.floor(m / 60), m % 60, 0, 0);
+        return d.getTime();
+      });
+
+    if (!today.length && !ydAt.length) {
       return {
         hourlyChart: el(
           'div',
@@ -3461,7 +3551,10 @@ class Component extends DCLogic {
 
     const HOUR = 3600000;
 
-    const firstAt = Math.min(...today.map(o => o.created.getTime()));
+    const todayAt = today.map(o => o.created.getTime());
+
+    // 시작 = 오늘·어제 중 더 이른 첫 주문의 정시
+    const firstAt = Math.min(...todayAt, ...ydAt);
 
     const h0 = new Date(firstAt);
     h0.setMinutes(0, 0, 0);
@@ -3471,29 +3564,40 @@ class Component extends DCLogic {
 
     const n = Math.floor((t1 - t0) / HOUR) + 1;
 
-    const counts = Array(n).fill(0);
+    const bin = ats => {
+      const cs = Array(n).fill(0);
+      ats.forEach(t => {
+        const i = Math.min(n - 1, Math.floor((t - t0) / HOUR));
+        if (i >= 0) cs[i] += 1;
+      });
+      return cs;
+    };
 
-    today.forEach(o => {
-      const i = Math.min(n - 1, Math.floor((o.created.getTime() - t0) / HOUR));
-      if (i >= 0) counts[i] += 1;
-    });
+    const counts = bin(todayAt);
+    const ydCounts = bin(ydAt);
 
     const maxCount = Math.max(...counts);
-    const yMax = Math.max(2, Math.ceil(maxCount / 2) * 2);
+    const yMax = Math.max(2, Math.ceil(Math.max(maxCount, ...ydCounts) / 2) * 2);
 
     const x = t => L + (t - t0) / (t1 - t0) * (W - L - R);
     const y = v => T + (1 - v / yMax) * (H - T - B);
 
-    const pts = counts.map((c, i) => {
+    const toPts = cs => cs.map((c, i) => {
       const s = t0 + i * HOUR;
       const e = Math.min(s + HOUR, t1);
       return { x: x((s + e) / 2), y: y(c), c, i };
     });
 
-    const line = pts.map((p, i) => `${i ? 'L' : 'M'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+    const toLine = ps => ps.map((p, i) => `${i ? 'L' : 'M'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+
+    const pts = toPts(counts);
+    const line = toLine(pts);
     const area = `${line} L${pts[pts.length - 1].x.toFixed(1)},${y(0)} L${pts[0].x.toFixed(1)},${y(0)} Z`;
 
-    const LINE = '#4BA3CC';
+    const ydPts = toPts(ydCounts);
+
+    const LINE = HOURLY_TODAY;
+    const YD_LINE = HOURLY_YDAY;
 
     const kids = [];
 
@@ -3548,7 +3652,36 @@ class Component extends DCLogic {
       fill: P.ink
     }, `현재 ${p2(now.getHours())}:${p2(now.getMinutes())}`));
 
-    // 면 + 선
+    // 어제 — 선 + 작은 점만 (면·숫자 없음). 오늘보다 먼저 그려 뒤에 깔린다
+    if (ydAt.length) {
+      kids.push(el('path', {
+        key: 'ydline', d: toLine(ydPts), fill: 'none', stroke: YD_LINE,
+        strokeWidth: 2, strokeLinejoin: 'round', strokeLinecap: 'round'
+      }));
+      ydPts.forEach(p => {
+        kids.push(el('circle', {
+          key: 'yp' + p.i,
+          cx: p.x, cy: p.y,
+          r: 2.5,
+          fill: '#FFFFFF',
+          stroke: YD_LINE,
+          strokeWidth: 1.5
+        }));
+      });
+    }
+
+    // 오늘 — 면 + 선 + 점 (어제 위에 그린다). 오늘 주문이 아직 없으면 어제만
+    if (!today.length) {
+      return {
+        hourlyChart: el('svg', {
+          width: W,
+          height: H,
+          viewBox: `0 0 ${W} ${H}`,
+          style: { position: 'absolute', left: 0, bottom: 0, overflow: 'visible' }
+        }, kids)
+      };
+    }
+
     kids.push(el('path', { key: 'area', d: area, fill: P.blue, opacity: 0.28 }));
     kids.push(el('path', {
       key: 'line', d: line, fill: 'none', stroke: LINE,
@@ -4935,7 +5068,7 @@ class Component extends DCLogic {
             alignItems: 'center',
             justifyContent: 'center',
             fontFamily: FONT_NUM,
-            fontSize: '16.8px',
+            fontSize: '15.1px',
             fontWeight: 700,
             color: P.ink,
             background: RANK_COLORS[i]
